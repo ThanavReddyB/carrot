@@ -8,6 +8,7 @@
 #include <iterator>
 #include <algorithm>
 #include <map>
+#include <sstream>
 #include "carrot/hash.hpp"
 
 namespace fs = std::filesystem;
@@ -2023,7 +2024,20 @@ bool Repository::merge(const std::string& branchName)
 
     if (conflict)
     {
+        std::ofstream mergeHead(".carrot/MERGE_HEAD");
+
+        if (!mergeHead)
+        {
+            std::cout << "Could not create MERGE_HEAD.\n";
+            return false;
+        }
+
+        mergeHead << targetCommit;
+
         std::cout << "Merge failed due to conflicts.\n";
+        std::cout << "Resolve the conflicts and run "
+                << "carrot merge --continue\n";
+
         return false;
     }
 
@@ -2162,4 +2176,464 @@ bool Repository::merge(const std::string& branchName)
               << '\n';
 
     return true;
+}
+
+bool Repository::mergeContinue()
+{
+    if (!repositoryExists())
+    {
+        std::cout << "Not a Carrot repository. Initialize a repository first.\n";
+        return false;
+    }
+
+    fs::path mergeHeadPath =
+        fs::path(".carrot") / "MERGE_HEAD";
+
+    std::ifstream mergeHeadFile(mergeHeadPath);
+
+    if (!mergeHeadFile)
+    {
+        std::cout << "No merge in progress.\n";
+        return false;
+    }
+
+    std::string targetCommit;
+    std::getline(mergeHeadFile, targetCommit);
+
+    if (targetCommit.empty())
+    {
+        std::cout << "Invalid MERGE_HEAD.\n";
+        return false;
+    }
+
+    // Make sure there are no unresolved conflict markers.
+    std::ifstream indexFile(".carrot/index");
+
+    if (!indexFile)
+    {
+        std::cout << "Could not open index.\n";
+        return false;
+    }
+
+    std::string line;
+
+    while (std::getline(indexFile, line))
+    {
+        if (line.empty())
+        {
+            continue;
+        }
+
+        std::size_t space = line.find(' ');
+
+        if (space == std::string::npos)
+        {
+            continue;
+        }
+
+        std::string fileName = line.substr(0, space);
+
+        std::ifstream file(fileName);
+
+        if (!file)
+        {
+            continue;
+        }
+
+        std::string content(
+            (std::istreambuf_iterator<char>(file)),
+            std::istreambuf_iterator<char>()
+        );
+
+        if (content.find("<<<<<<< ") != std::string::npos ||
+            content.find("=======") != std::string::npos ||
+            content.find(">>>>>>> ") != std::string::npos)
+        {
+            std::cout << "Cannot continue merge: unresolved conflicts remain.\n";
+            return false;
+        }
+    }
+
+    // The current branch's commit becomes parent 1.
+    std::ifstream headFile(".carrot/HEAD");
+
+    if (!headFile)
+    {
+        std::cout << "Could not open HEAD.\n";
+        return false;
+    }
+
+    std::string currentBranch;
+    std::getline(headFile, currentBranch);
+
+    fs::path branchPath =
+        fs::path(".carrot") / "refs" / "heads" / currentBranch;
+
+    std::ifstream branchFile(branchPath);
+
+    if (!branchFile)
+    {
+        std::cout << "Could not read current branch.\n";
+        return false;
+    }
+
+    std::string currentCommit;
+    std::getline(branchFile, currentCommit);
+
+    if (currentCommit.empty())
+    {
+        std::cout << "Current branch has no commit.\n";
+        return false;
+    }
+
+    // The index now represents the resolved merge result.
+    std::string treeHash = createTreeFromIndex();
+
+    if (treeHash.empty())
+    {
+        std::cout << "Could not create merge tree.\n";
+        return false;
+    }
+
+    std::string commitContent;
+
+    commitContent += "commit\n";
+
+    commitContent += "tree\n";
+    commitContent += treeHash;
+    commitContent += "\n";
+
+    commitContent += "parent\n";
+    commitContent += currentCommit;
+    commitContent += "\n";
+
+    commitContent += "parent\n";
+    commitContent += targetCommit;
+    commitContent += "\n";
+
+    commitContent += "message\n";
+    commitContent += "Merge branch";
+    commitContent += "\n";
+
+    std::string mergeCommitHash =
+        Hash::sha256(commitContent);
+
+    fs::path commitPath =
+        fs::path(".carrot") / "objects" / mergeCommitHash;
+
+    if (!fs::exists(commitPath))
+    {
+        std::ofstream commitFile(commitPath);
+
+        if (!commitFile)
+        {
+            std::cout << "Could not create merge commit.\n";
+            return false;
+        }
+
+        commitFile << commitContent;
+    }
+
+    std::ofstream branchOutput(branchPath);
+
+    if (!branchOutput)
+    {
+        std::cout << "Could not update current branch.\n";
+        return false;
+    }
+
+    branchOutput << mergeCommitHash;
+
+    mergeHeadFile.close();
+    fs::remove(mergeHeadPath);
+
+    std::cout << "Merge completed: "
+              << mergeCommitHash << '\n';
+
+    return true;
+}
+
+void Repository::diff() const
+{
+    std::ifstream indexFile(".carrot/index");
+
+    if (!indexFile)
+    {
+        std::cout << "Could not open index.\n";
+        return;
+    }
+
+    std::string line;
+
+    while (std::getline(indexFile, line))
+    {
+        if (line.empty())
+        {
+            continue;
+        }
+
+        std::size_t space = line.find(' ');
+
+        if (space == std::string::npos)
+        {
+            continue;
+        }
+
+        std::string fileName = line.substr(0, space);
+        std::string indexedHash = line.substr(space + 1);
+
+        std::ifstream file(fileName);
+
+        if (!file)
+        {
+            std::cout << "deleted: " << fileName << '\n';
+            continue;
+        }
+
+        std::string currentContent(
+            (std::istreambuf_iterator<char>(file)),
+            std::istreambuf_iterator<char>()
+        );
+
+        std::string currentHash =
+            Hash::sha256("blob\n" + currentContent);
+
+        if (currentHash == indexedHash)
+        {
+            continue;
+        }
+
+        // Read the indexed blob.
+        fs::path blobPath =
+            fs::path(".carrot") / "objects" / indexedHash;
+
+        std::ifstream blobFile(blobPath);
+
+        if (!blobFile)
+        {
+            std::cout << "Could not read indexed object: "
+                      << fileName << '\n';
+            continue;
+        }
+
+        std::string blobType;
+        std::getline(blobFile, blobType);
+
+        std::string oldContent(
+            (std::istreambuf_iterator<char>(blobFile)),
+            std::istreambuf_iterator<char>()
+        );
+
+        std::cout << "--- " << fileName << '\n';
+        std::cout << "+++ " << fileName << '\n';
+
+        std::istringstream oldStream(oldContent);
+        std::istringstream newStream(currentContent);
+
+        std::vector<std::string> oldLines;
+        std::vector<std::string> newLines;
+
+        std::string oldLine;
+        std::string newLine;
+
+        while (std::getline(oldStream, oldLine))
+        {
+            oldLines.push_back(oldLine);
+        }
+
+        while (std::getline(newStream, newLine))
+        {
+            newLines.push_back(newLine);
+        }
+
+        std::size_t maxLines =
+            std::max(oldLines.size(), newLines.size());
+
+        for (std::size_t i = 0; i < maxLines; ++i)
+        {
+            if (i >= oldLines.size())
+            {
+                std::cout << "+ " << newLines[i] << '\n';
+            }
+            else if (i >= newLines.size())
+            {
+                std::cout << "- " << oldLines[i] << '\n';
+            }
+            else if (oldLines[i] != newLines[i])
+            {
+                std::cout << "- " << oldLines[i] << '\n';
+                std::cout << "+ " << newLines[i] << '\n';
+            }
+        }
+    }
+}
+
+
+void Repository::diffCached() const
+{
+    std::ifstream indexFile(".carrot/index");
+
+    if (!indexFile)
+    {
+        std::cout << "Could not open index.\n";
+        return;
+    }
+
+    std::ifstream headFile(".carrot/HEAD");
+
+    if (!headFile)
+    {
+        std::cout << "Could not open HEAD.\n";
+        return;
+    }
+
+    std::string branch;
+    std::getline(headFile, branch);
+
+    std::ifstream branchFile(
+        fs::path(".carrot") / "refs" / "heads" / branch
+    );
+
+    if (!branchFile)
+    {
+        std::cout << "No commits yet.\n";
+        return;
+    }
+
+    std::string commitId;
+    std::getline(branchFile, commitId);
+
+    if (commitId.empty())
+    {
+        std::cout << "No commits yet.\n";
+        return;
+    }
+
+    std::string treeHash = getCommitTree(commitId);
+
+    if (treeHash.empty())
+    {
+        std::cout << "Could not find commit tree.\n";
+        return;
+    }
+
+    std::ifstream treeFile(
+        fs::path(".carrot") / "objects" / treeHash
+    );
+
+    if (!treeFile)
+    {
+        std::cout << "Could not open tree.\n";
+        return;
+    }
+
+    std::vector<std::string> headFiles;
+
+    std::string line;
+    std::getline(treeFile, line); // "tree"
+
+    while (std::getline(treeFile, line))
+    {
+        if (!line.empty())
+        {
+            headFiles.push_back(line);
+        }
+    }
+
+    std::vector<std::string> indexFiles;
+
+    while (std::getline(indexFile, line))
+    {
+        if (!line.empty())
+        {
+            indexFiles.push_back(line);
+        }
+    }
+
+    for (const auto& indexEntry : indexFiles)
+    {
+        std::size_t space = indexEntry.find(' ');
+
+        if (space == std::string::npos)
+        {
+            continue;
+        }
+
+        std::string fileName = indexEntry.substr(0, space);
+        std::string indexHash = indexEntry.substr(space + 1);
+
+        bool found = false;
+
+        for (const auto& headEntry : headFiles)
+        {
+            std::size_t headSpace = headEntry.find(' ');
+
+            if (headSpace == std::string::npos)
+            {
+                continue;
+            }
+
+            std::string headFileName =
+                headEntry.substr(0, headSpace);
+
+            std::string headHash =
+                headEntry.substr(headSpace + 1);
+
+            if (headFileName == fileName)
+            {
+                found = true;
+
+                if (headHash != indexHash)
+                {
+                    std::cout << "modified: "
+                              << fileName << '\n';
+                }
+
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            std::cout << "new file: "
+                      << fileName << '\n';
+        }
+    }
+
+    // Detect files removed from the index.
+    for (const auto& headEntry : headFiles)
+    {
+        std::size_t space = headEntry.find(' ');
+
+        if (space == std::string::npos)
+        {
+            continue;
+        }
+
+        std::string fileName = headEntry.substr(0, space);
+
+        bool found = false;
+
+        for (const auto& indexEntry : indexFiles)
+        {
+            std::size_t indexSpace = indexEntry.find(' ');
+
+            if (indexSpace == std::string::npos)
+            {
+                continue;
+            }
+
+            if (indexEntry.substr(0, indexSpace) == fileName)
+            {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            std::cout << "deleted: "
+                      << fileName << '\n';
+        }
+    }
 }

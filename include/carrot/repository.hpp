@@ -16,6 +16,9 @@ public:
     void branch(const std::string& branchName);
     bool switchBranch(const std::string& branchName);
     bool merge(const std::string& branchName);
+    bool mergeContinue();
+    void diff() const;
+    void diffCached() const;
 
 private:
     bool repositoryExists() const;

@@ -97,7 +97,25 @@ int main(int argc, char* argv[])
             return 1;
         }
 
-        repo.merge(argv[2]);
+        if (std::string(argv[2]) == "--continue")
+        {
+            repo.mergeContinue();
+        }
+        else
+        {
+            repo.merge(argv[2]);
+        }   
+    }
+    else if (command == "diff")
+    {
+        if (argc >= 3 && std::string(argv[2]) == "--cached")
+        {
+            repo.diffCached();
+        }
+        else
+        {
+            repo.diff();
+        }
     }
     else
     {
