@@ -1,3 +1,29 @@
-build/
+# Carrot generated data
 .carrot/
+
+# Build output
+build/
+
+# IDE / editor files
 .vscode/
+.idea/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Compiled binaries / libraries
+*.exe
+*.dll
+*.a
+*.o
+*.obj
+
+# OS junk
+.DS_Store
+Thumbs.db
+CARROT_DOCUMENTATION.md
